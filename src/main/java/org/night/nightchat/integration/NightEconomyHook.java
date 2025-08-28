@@ -51,7 +51,7 @@ public class NightEconomyHook {
     }
 
     /**
-     * Returns the current tycoon's player name for the given currency.
+     * Returns the current tycoon's player name for the given currency (if needed elsewhere).
      * Uses getCurrentTycoon(currencyId). Falls back to ProfileCache if name is missing.
      */
     public String getTycoonName(String currencyId, MinecraftServer server) {
@@ -73,5 +73,26 @@ public class NightEconomyHook {
             Nightchat.LOGGER.warn("NightEconomy getTycoonName failed: {}", t.toString());
             return null;
         }
+    }
+
+    /**
+     * Returns the Tycoon TAG for the given currency only if the player is the tycoon.
+     * Otherwise returns empty string.
+     */
+    public String getTycoonTagIfSelf(ServerPlayer p, String currencyId) {
+        if (api == null) return "";
+        try {
+            TycoonInfo info = api.getCurrentTycoon(currencyId);
+            if (info != null && info.playerId() != null && info.playerId().equals(p.getUUID())) {
+                String tag = info.tag();
+                if (tag == null || tag.isBlank()) {
+                    tag = api.getTycoonTag(currencyId);
+                }
+                return tag == null ? "" : tag;
+            }
+        } catch (Throwable t) {
+            Nightchat.LOGGER.warn("NightEconomy getTycoonTagIfSelf failed: {}", t.toString());
+        }
+        return "";
     }
 }

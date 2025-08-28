@@ -232,24 +232,18 @@ public class ChatService {
         m.put("message", rawMessage);
 
         if (c.currencyEnabled && economy.isReady()) {
-            if (luckPerms.hasPermission(sender, "nightchat.tag.money")) {
-                double bal = economy.getBalance(sender, c.currencyId);
-                m.put("money", NumberUtil.formatCompact(bal));
-            } else {
-                m.put("money", "");
-            }
-            String tycoon = economy.getTycoonName(c.currencyId, sender.server);
-            m.put("money_tycoon", tycoon == null ? "" : tycoon);
+            double bal = economy.getBalance(sender, c.currencyId);
+            m.put("money", NumberUtil.formatCompact(bal));
+
+            String tycoonTag = economy.getTycoonTagIfSelf(sender, c.currencyId);
+            m.put("money_tycoon", tycoonTag == null ? "" : tycoonTag);
         } else {
             m.put("money", "");
             m.put("money_tycoon", "");
         }
-        m.putIfAbsent("channel_logo", "");
-        m.putIfAbsent("prime", "");
         return m;
     }
 
-    // Versão que aplica transformações do canal na mensagem
     private Map<String, String> buildPlaceholders(Channel c, ServerPlayer sender, String rawMessage, boolean applyTransforms) {
         String msg = applyTransforms ? applyChannelTransformations(c, rawMessage) : rawMessage;
         Map<String, String> base = buildPlaceholders(c, sender, msg);
@@ -257,47 +251,73 @@ public class ChatService {
         return base;
     }
 
-    // Expansão %...% em tags
+    // Expansão %...% (PlaceholderAPI-like) no texto
+// Expansão %...% (PlaceholderAPI-like) no texto
     private String expandPercentTokens(String in, Channel c, ServerPlayer sender) {
         if (in == null || in.isEmpty()) return "";
-        return PERCENT_TOKEN.matcher(in).replaceAll(match -> {
-            String a = match.group(1);
-            String b = match.group(2);
-            String c3 = match.group(3);
+        Matcher matcher = PERCENT_TOKEN.matcher(in);
+        StringBuffer out = new StringBuffer();
 
-            if ("player".equalsIgnoreCase(a)) {
-                return sender.getGameProfile().getName();
+        while (matcher.find()) {
+            String aRaw = matcher.group(1); // pode vir completo ex.: "nighteconomy_money_tycoon"
+            String b = matcher.group(2);
+            String c3 = matcher.group(3);
+
+            // Ajuste contra ganância do primeiro grupo: se b/c3 nulos e houver "_", dividir manualmente
+            String a = aRaw;
+            if ((b == null || b.isEmpty()) && (c3 == null || c3.isEmpty()) && aRaw != null && aRaw.indexOf('_') != -1) {
+                String[] parts = aRaw.split("_", 3);
+                a = parts[0];
+                if (parts.length > 1) b = parts[1];
+                if (parts.length > 2) c3 = parts[2];
             }
-            if ("luckperms_prefix".equalsIgnoreCase(a)) {
+
+            String replacement;
+
+            if ("player".equalsIgnoreCase(a) && "click".equalsIgnoreCase(b)) {
+                replacement = "%player_click%";
+            } else if ("player_click".equalsIgnoreCase(a)) {
+                replacement = "%player_click%";
+            } else if (("luckperms".equalsIgnoreCase(a) && "prefix".equalsIgnoreCase(b)) || "luckperms_prefix".equalsIgnoreCase(a)) {
                 String p = luckPerms.getPrefix(sender);
-                return p == null ? "" : p;
-            }
-            if ("luckperms_suffix".equalsIgnoreCase(a)) {
+                replacement = p == null ? "" : p;
+            } else if (("luckperms".equalsIgnoreCase(a) && "suffix".equalsIgnoreCase(b)) || "luckperms_suffix".equalsIgnoreCase(a)) {
                 String s = luckPerms.getSuffix(sender);
-                return s == null ? "" : s;
-            }
-            if ("nighteconomy".equalsIgnoreCase(a) && b != null) {
+                replacement = s == null ? "" : s;
+            } else if ("player".equalsIgnoreCase(a)) {
+                replacement = sender.getGameProfile().getName();
+            } else if ("nighteconomy".equalsIgnoreCase(a) && b != null) {
                 String cur = b.toLowerCase(Locale.ROOT);
-                if ("tycoon".equalsIgnoreCase(c3)) {
-                    String t = economy.getTycoonName(cur, sender.server);
-                    return t == null ? "" : t;
+                String suff = c3 == null ? "" : c3.toLowerCase(Locale.ROOT);
+
+                // TAG do Tycoon do REMETENTE (se não for tycoon, retorna vazio)
+                if ("tycoon".equals(suff) || "tag".equals(suff)) {
+                    String t = economy.isReady() ? economy.getTycoonTagIfSelf(sender, cur) : "";
+                    replacement = (t == null) ? "" : t;
                 }
-                if ("balance".equalsIgnoreCase(c3)) {
-                    double bal = economy.getBalance(sender, cur);
-                    return NumberUtil.formatCompact(bal);
+                // Saldo do remetente (aceita _balance ou vazio)
+                else if ("balance".equals(suff) || suff.isEmpty()) {
+                    double bal = economy.isReady() ? economy.getBalance(sender, cur) : 0.0D;
+                    replacement = NumberUtil.formatCompact(bal);
                 }
+                // Qualquer outro sufixo desconhecido de nighteconomy não vaza literal
+                else {
+                    replacement = "";
+                }
+            } else {
+                // Placeholder desconhecido: mantemos como veio
+                replacement = matcher.group(0);
             }
-            if ("player_click".equalsIgnoreCase(a)) {
-                return "%player_click%";
-            }
-            return match.group(0);
-        });
+
+            // Escapar replacement para não interpretar $n e '\' como backreferences
+            matcher.appendReplacement(out, Matcher.quoteReplacement(replacement));
+        }
+        matcher.appendTail(out);
+        return out.toString();
     }
 
-    // Remove apenas espaços ' ' no começo/fim
     private static String lstripSpaces(String s) {
-        int i = 0;
-        int n = s.length();
+        int i = 0, n = s.length();
         while (i < n && s.charAt(i) == ' ') i++;
         return i == 0 ? s : s.substring(i);
     }
@@ -307,10 +327,31 @@ public class ChatService {
         return i == s.length() ? s : s.substring(0, i);
     }
 
-    // Constrói o Component do formato com remoção de espaços “à toa” ao redor de tokens vazios
+    private static boolean containsUnexpandedPercent(String s) {
+        return s != null && s.indexOf('%') != -1 && PERCENT_TOKEN.matcher(s).find();
+    }
+
+    private String joinWithSingleSpace(StringBuilder buf, String s) {
+        if (s == null || s.isEmpty()) return s == null ? "" : s;
+        boolean bufEndsWithSpace = buf.length() > 0 && buf.charAt(buf.length() - 1) == ' ';
+        boolean sStartsWithSpace = s.charAt(0) == ' ';
+
+        if (bufEndsWithSpace && sStartsWithSpace) {
+            int i = 0;
+            while (i < s.length() && s.charAt(i) == ' ') i++;
+            return s.substring(i); // remove os espaços extras à esquerda
+        }
+        if (!bufEndsWithSpace && !sStartsWithSpace && buf.length() > 0) {
+            return " " + s; // injeta um espaço de separação
+        }
+        return s;
+    }
+
     private Component parseFormatToComponent(Channel c, String format, Map<String, String> ph, ServerPlayer sender) {
         if (format == null) format = "";
+
         Component result = Component.empty();
+        StringBuilder plainBuf = new StringBuilder();
 
         Matcher m = TOKEN_PATTERN.matcher(format);
         int last = 0;
@@ -319,41 +360,83 @@ public class ChatService {
         while (m.find()) {
             String token = m.group(1);
 
-            // Resolve token primeiro para saber se ele é vazio
+            // Texto antes do token
+            String chunk = format.substring(last, m.start());
+            // Não removemos espaços à esquerda aqui; o joinWithSingleSpace normaliza
+            if (!chunk.isEmpty()) {
+                chunk = expandPercentTokens(chunk, c, sender);
+                chunk = joinWithSingleSpace(plainBuf, chunk);
+                plainBuf.append(chunk);
+            }
+
+            // Resolver token
             TagDefinition tag = c.getTag(token);
             boolean tokenEmpty;
             Component tokenComp = null;
             String tokenVal = null;
 
             if (tag != null) {
-                // Tag com hover/click/perm
-                String placeholderText = ph.get(token);
-                Component tagComp = renderTagComponent(tag, c, sender, placeholderText);
-                tokenEmpty = (tagComp == null);
-                if (!tokenEmpty) tokenComp = tagComp;
+                // Permissão do Tag
+                if (tag.permission != null && !tag.permission.isBlank() && !luckPerms.hasPermission(sender, tag.permission)) {
+                    tokenEmpty = true;
+                } else {
+                    // Preferimos valor do placeholder explícito; se vazio, caímos para hover[0]
+                    String fromPH = expandPercentTokens(ph.getOrDefault(token, ""), c, sender);
+                    String fromHover = (!tag.hover.isEmpty()) ? expandPercentTokens(tag.hover.get(0), c, sender) : "";
+
+                    // Como o espaçamento vem do format, limpamos bordas do conteúdo do tag
+                    if (fromPH != null) fromPH = fromPH.strip();
+                    if (fromHover != null) fromHover = fromHover.strip();
+
+                    String baseText = (fromPH != null && !fromPH.isEmpty()) ? fromPH
+                            : (fromHover != null ? fromHover : "");
+
+                    if (baseText == null || baseText.isEmpty()) {
+                        tokenEmpty = true;
+                    } else {
+                        Component comp = TextUtil.legacyToComponent(baseText);
+
+                        // Tooltip: SOMENTE 'suggest'
+                        List<String> suggestLines = new ArrayList<>();
+                        for (String s : tag.suggest) {
+                            String line = expandPercentTokens(s, c, sender);
+                            if (!line.isBlank()) suggestLines.add(line);
+                        }
+                        if (!suggestLines.isEmpty()) {
+                            String hoverJoined = String.join("\n", suggestLines);
+                            comp = comp.copy().withStyle(style ->
+                                    style.withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, TextUtil.legacyToComponent(hoverJoined)))
+                            );
+                        }
+                        if (!tag.suggestCommand.isEmpty()) {
+                            String cmd = expandPercentTokens(tag.suggestCommand.get(0), c, sender);
+                            if (!cmd.isBlank()) {
+                                comp = comp.copy().withStyle(style ->
+                                        style.withClickEvent(new ClickEvent(ClickEvent.Action.SUGGEST_COMMAND, cmd)));
+                            }
+                        }
+
+                        tokenComp = comp;
+                        tokenEmpty = false;
+                    }
+                }
             } else {
-                tokenVal = ph.getOrDefault(token, "");
-                tokenEmpty = (tokenVal == null || tokenVal.isEmpty());
+                tokenVal = expandPercentTokens(ph.getOrDefault(token, ""), c, sender);
+                if (tokenVal == null) tokenVal = "";
+                tokenVal = joinWithSingleSpace(plainBuf, tokenVal);
+                tokenEmpty = tokenVal.isEmpty();
             }
 
-            // Texto antes do token
-            String chunk = format.substring(last, m.start());
-            if (prevEmptyToken) {
-                chunk = lstripSpaces(chunk);
-            }
-            if (tokenEmpty) {
-                chunk = rstripSpaces(chunk);
-            }
-            if (!chunk.isEmpty()) {
-                result = result.copy().append(TextUtil.legacyToComponent(chunk));
-            }
-
-            // Anexa token se não for vazio
+            // Anexa token
             if (!tokenEmpty) {
                 if (tokenComp != null) {
+                    if (plainBuf.length() > 0) {
+                        result = result.copy().append(TextUtil.legacyToComponent(plainBuf.toString()));
+                        plainBuf.setLength(0);
+                    }
                     result = result.copy().append(tokenComp);
                 } else {
-                    result = result.copy().append(TextUtil.legacyToComponent(tokenVal));
+                    plainBuf.append(tokenVal);
                 }
             }
 
@@ -363,44 +446,17 @@ public class ChatService {
 
         // Sufixo após o último token
         String tail = format.substring(last);
-        if (prevEmptyToken) {
-            tail = lstripSpaces(tail);
-        }
         if (!tail.isEmpty()) {
-            result = result.copy().append(TextUtil.legacyToComponent(tail));
+            tail = expandPercentTokens(tail, c, sender);
+            tail = joinWithSingleSpace(plainBuf, tail);
+            plainBuf.append(tail);
         }
+
+        if (plainBuf.length() > 0) {
+            result = result.copy().append(TextUtil.legacyToComponent(plainBuf.toString()));
+        }
+
         return result;
-    }
-
-    private Component renderTagComponent(TagDefinition tag, Channel c, ServerPlayer sender, String placeholderText) {
-        if (tag.permission != null && !tag.permission.isBlank() && !luckPerms.hasPermission(sender, tag.permission)) {
-            return null;
-        }
-        String baseText = placeholderText;
-        if (baseText == null || baseText.isBlank()) {
-            baseText = tag.hover.isEmpty() ? "" : tag.hover.get(0);
-        }
-        baseText = expandPercentTokens(baseText, c, sender);
-        if (baseText.isBlank()) return null;
-
-        Component comp = TextUtil.legacyToComponent(baseText);
-
-        List<String> hoverLines = new ArrayList<>();
-        for (String s : tag.hover) hoverLines.add(expandPercentTokens(s, c, sender));
-        for (String s : tag.suggest) hoverLines.add(expandPercentTokens(s, c, sender));
-        if (!hoverLines.isEmpty()) {
-            String hoverJoined = String.join("\n", hoverLines);
-            comp = comp.copy().withStyle(style ->
-                    style.withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, TextUtil.legacyToComponent(hoverJoined)))
-            );
-        }
-        if (!tag.suggestCommand.isEmpty()) {
-            String cmd = expandPercentTokens(tag.suggestCommand.get(0), c, sender);
-            if (!cmd.isBlank()) {
-                comp = comp.copy().withStyle(style -> style.withClickEvent(new ClickEvent(ClickEvent.Action.SUGGEST_COMMAND, cmd)));
-            }
-        }
-        return comp;
     }
 
     private String applyChannelTransformations(Channel c, String message) {
@@ -518,7 +574,6 @@ public class ChatService {
 
         Component formatted = parseFormatToComponent(channel, channel.format, buildPlaceholders(channel, sender, msgForRender, false), sender);
 
-        // Entrega manual e cancelamento do evento para evitar mensagem duplicada do chat vanilla
         Set<ServerPlayer> recipients = new LinkedHashSet<>();
         computeRecipientsAndDeliver(channel, sender, formatted, msgForRender, mentioned, recipients);
         event.setCanceled(true);
@@ -592,7 +647,6 @@ public class ChatService {
         return true;
     }
 
-    // Passamos também a mensagem “limpa” para usar no spy
     private void computeRecipientsAndDeliver(Channel channel, ServerPlayer sender, Component formatted,
                                              String originalMessage, Map<String, ServerPlayer> mentioned, Set<ServerPlayer> recipients) {
         MinecraftServer server = sender.server;
@@ -646,12 +700,10 @@ public class ChatService {
             }
         }
 
-        // Entrega principal
         for (ServerPlayer p : recipients) {
             p.sendSystemMessage(formatted);
         }
 
-        // Spy para quem não recebeu a mensagem principal
         if (!spyChannels.isEmpty()) {
             Component spyMsg = parseFormatToComponent(
                     channel,
@@ -666,7 +718,6 @@ public class ChatService {
             }
         }
 
-        // Som de menção
         if (channel.mentionable && mentioned != null && !mentioned.isEmpty()) {
             for (ServerPlayer p : mentioned.values()) {
                 if (!recipients.contains(p)) continue;
@@ -677,7 +728,7 @@ public class ChatService {
     }
 
     private boolean handleEconomyCost(ServerPlayer sender, Channel c, String raw) {
-        if (!c.currencyEnabled || c.messageCost <= 0 && c.minBalance <= 0) return true;
+        if (!c.currencyEnabled || (c.messageCost <= 0 && c.minBalance <= 0)) return true;
         if (!economy.isReady()) return true;
         double bal = economy.getBalance(sender, c.currencyId);
         if (bal < c.minBalance) {
@@ -695,5 +746,9 @@ public class ChatService {
             }
         }
         return true;
+    }
+
+    public void rebuildFilters() {
+        this.filters.rebuildFromConfig();
     }
 }

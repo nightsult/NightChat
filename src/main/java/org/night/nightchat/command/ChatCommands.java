@@ -22,6 +22,41 @@ public class ChatCommands {
                                 LuckPermsHook lp,
                                 GlobalConfig global) {
 
+        // /nightchat reload
+        d.register(Commands.literal("nightchat")
+                .requires(src -> {
+                    try {
+                        ServerPlayer p = src.getPlayer();
+                        // Permite OP nível 2+ OU permissão LuckPerms "nightchat.reload"
+                        return src.hasPermission(2) || (p != null && lp.hasPermission(p, "nightchat.reload"));
+                    } catch (Exception e) {
+                        // Console tem permissão
+                        return true;
+                    }
+                })
+                .then(Commands.literal("reload")
+                        .executes(ctx -> {
+                            var src = ctx.getSource();
+                            var server = src.getServer();
+                            try {
+                                // Recarrega configs globais
+                                global.loadOrCreateDefaults(server);
+                                // Recarrega filtros a partir da config
+                                chat.rebuildFilters();
+                                // Recarrega canais (formatos, tags, permissões, etc.)
+                                channels.loadOrCreateDefaults(server);
+
+                                // Avisos
+                                src.sendSuccess(() -> TextUtil.legacyToComponent("&aNightChat recarregado com sucesso."), true);
+                                src.sendSuccess(() -> TextUtil.legacyToComponent("&7Canais carregados: &e" + channels.all().size()), false);
+                                src.sendSuccess(() -> TextUtil.legacyToComponent("&7Observação: alterações em 'commands' dos canais exigem reinício para atualizar os aliases."), false);
+                                return 1;
+                            } catch (Throwable t) {
+                                src.sendFailure(TextUtil.legacyToComponent("&cFalha ao recarregar NightChat: " + t.getClass().getSimpleName() + " - " + t.getMessage()));
+                                return 0;
+                            }
+                        })));
+
         // Mensagem privada
         d.register(Commands.literal("tell")
                 .then(Commands.argument("target", net.minecraft.commands.arguments.EntityArgument.player())
